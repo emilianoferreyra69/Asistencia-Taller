@@ -1,0 +1,1094 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Asistencia</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+import { getDatabase, ref, set, get, onValue, remove }
+  from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
+
+// ══════════════════════════════════════════════════════════════
+//  REEMPLAZÁ ESTOS DATOS CON LOS DE TU PROYECTO FIREBASE
+// ══════════════════════════════════════════════════════════════
+const firebaseConfig = {
+  apiKey:            "PEGA-AQUI-TU-apiKey",
+  authDomain:        "PEGA-AQUI-TU-authDomain",
+  databaseURL:       "PEGA-AQUI-TU-databaseURL",
+  projectId:         "PEGA-AQUI-TU-projectId",
+  storageBucket:     "PEGA-AQUI-TU-storageBucket",
+  messagingSenderId: "PEGA-AQUI-TU-messagingSenderId",
+  appId:             "PEGA-AQUI-TU-appId"
+};
+// ══════════════════════════════════════════════════════════════
+
+const app = initializeApp(firebaseConfig);
+const db  = getDatabase(app);
+
+// ── Feriados Argentina 2025 y 2026 ───────────────────────────
+const FERIADOS = {
+  // 2025
+  '2025-01-01':'AÑO NUEVO','2025-03-03':'CARNAVAL','2025-03-04':'CARNAVAL',
+  '2025-03-24':'DÍA DE LA MEMORIA','2025-04-02':'MALVINAS',
+  '2025-04-17':'JUEVES SANTO','2025-04-18':'VIERNES SANTO',
+  '2025-05-01':'DÍA DEL TRABAJADOR','2025-05-25':'REVOLUCIÓN DE MAYO',
+  '2025-06-16':'GÜEMES','2025-06-20':'BELGRANO','2025-07-09':'INDEPENDENCIA',
+  '2025-08-17':'SAN MARTÍN','2025-10-12':'DIVERSIDAD CULTURAL',
+  '2025-11-20':'SOBERANÍA NACIONAL','2025-12-08':'INMACULADA CONCEPCIÓN',
+  '2025-12-25':'NAVIDAD',
+  // 2026
+  '2026-01-01':'AÑO NUEVO','2026-02-16':'CARNAVAL','2026-02-17':'CARNAVAL',
+  '2026-03-23':'DÍA DE LA MEMORIA','2026-04-02':'MALVINAS',
+  '2026-04-02':'JUEVES SANTO','2026-04-03':'VIERNES SANTO',
+  '2026-05-01':'DÍA DEL TRABAJADOR','2026-05-25':'REVOLUCIÓN DE MAYO',
+  '2026-06-15':'GÜEMES','2026-06-20':'BELGRANO','2026-07-09':'INDEPENDENCIA',
+  '2026-08-17':'SAN MARTÍN','2026-10-12':'DIVERSIDAD CULTURAL',
+  '2026-11-20':'SOBERANÍA NACIONAL','2026-12-08':'INMACULADA CONCEPCIÓN',
+  '2026-12-25':'NAVIDAD'
+};
+
+// ════════════════════════════════════════════════════════════
+//  FECHA ARGENTINA — solución al bug de UTC
+//  En vez de toISOString() que usa UTC, usamos la hora local
+// ════════════════════════════════════════════════════════════
+function fechaArgentina() {
+  const ahora = new Date();
+  const anio  = ahora.getFullYear();
+  const mes   = String(ahora.getMonth() + 1).padStart(2, '0');
+  const dia   = String(ahora.getDate()).padStart(2, '0');
+  return `${anio}-${mes}-${dia}`;
+}
+function horaArgentina() {
+  const ahora = new Date();
+  const h = String(ahora.getHours()).padStart(2, '0');
+  const m = String(ahora.getMinutes()).padStart(2, '0');
+  return `${h}:${m}`;
+}
+
+// Rutas Firebase
+const cfgRef     = ()      => ref(db, 'config');
+const alumnosRef = ()      => ref(db, 'alumnos');
+const regRef     = (f)     => ref(db, `registros/${f}`);
+const regIdRef   = (f, id) => ref(db, `registros/${f}/${id}`);
+
+const CFG_DEF = {
+  curso:'', materia:'', docente:'', escuela:'',
+  inicio:'08:00', tolerancia:'08:15', cierre:'09:00', clave:'docente123'
+};
+
+let CFG     = {...CFG_DEF};
+let ALUMNOS = [];
+let vistaActualMes  = null;
+let diaSeleccionado = null;
+let registrosHoy    = {};
+let unsubHoy        = null;
+
+// ════════════════════════════════════════════════════════════
+//  HUELLA DEL DISPOSITIVO
+// ════════════════════════════════════════════════════════════
+async function getFingerprint() {
+  const s = [
+    navigator.language||'', (navigator.languages||[]).join(','),
+    Intl.DateTimeFormat().resolvedOptions().timeZone||'',
+    screen.width+'x'+screen.height, String(screen.colorDepth),
+    navigator.platform||'', String(navigator.hardwareConcurrency||''),
+    String(navigator.maxTouchPoints||''), navigator.vendor||'',
+  ];
+  try {
+    const c=document.createElement('canvas');c.width=200;c.height=40;
+    const ctx=c.getContext('2d');
+    ctx.textBaseline='top';ctx.font='14px Arial';
+    ctx.fillStyle='#f60';ctx.fillRect(0,0,200,40);
+    ctx.fillStyle='#069';ctx.fillText('asis-fp-2025',2,2);
+    ctx.fillStyle='rgba(102,204,0,0.7)';ctx.fillText('asis-fp-2025',4,4);
+    s.push(c.toDataURL().slice(-80));
+  } catch(e){}
+  const txt=s.join('|');let h=5381;
+  for(let i=0;i<txt.length;i++){h=((h<<5)+h)^txt.charCodeAt(i);h=h&h;}
+  return Math.abs(h).toString(16).padStart(8,'0');
+}
+
+// ════════════════════════════════════════════════════════════
+//  CALCULAR ESTADO
+// ════════════════════════════════════════════════════════════
+function calcEstado(hora) {
+  const toM = h => { const[hh,mm]=h.split(':').map(Number); return hh*60+mm; };
+  const m = toM(hora);
+  if (m <= toM(CFG.tolerancia)) return 'presente';
+  if (m <= toM(CFG.cierre))     return 'tardanza';
+  return 'ausente';
+}
+
+const norm = s => s.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim();
+
+// ════════════════════════════════════════════════════════════
+//  INICIO
+// ════════════════════════════════════════════════════════════
+window.addEventListener('DOMContentLoaded', async () => {
+  try {
+    const [cs, as] = await Promise.all([get(cfgRef()), get(alumnosRef())]);
+    if (cs.exists()) CFG     = Object.assign({}, CFG_DEF, cs.val());
+    if (as.exists()) ALUMNOS = as.val() || [];
+  } catch(e) { console.warn('Sin conexión'); }
+
+  const p = new URLSearchParams(window.location.search);
+  if (p.get('alumno') === '1') { mostrarVistaAlumno(); return; }
+  if (sessionStorage.getItem('doc_ok') === '1') { mostrarDocente(); }
+  else { document.getElementById('vista-login').style.display = 'block'; }
+});
+
+// ════════════════════════════════════════════════════════════
+//  VISTA ALUMNO
+// ════════════════════════════════════════════════════════════
+function mostrarVistaAlumno() {
+  document.getElementById('vista-alumno').style.display = 'block';
+  document.getElementById('al-titulo').textContent = CFG.materia || 'Registro de asistencia';
+  document.getElementById('al-sub').textContent =
+    (CFG.curso ? CFG.curso + ' — ' : '') + CFG.docente + ' · Buscá tu apellido y seleccioná tu nombre.';
+}
+
+window.filtrarSugerencias = function() {
+  const val  = document.getElementById('al-nombre').value;
+  const lista = document.getElementById('al-sugerencias');
+  lista.innerHTML = '';
+  if (!val.trim() || val.length < 2) { lista.style.display='none'; return; }
+  const q = norm(val);
+  const matches = ALUMNOS.filter(a => norm(a).includes(q)).slice(0, 8);
+  if (!matches.length) { lista.style.display='none'; return; }
+  matches.forEach(alumno => {
+    const li = document.createElement('li'); li.textContent = alumno;
+    li.onclick = () => { document.getElementById('al-nombre').value=alumno; lista.style.display='none'; document.getElementById('al-btn').focus(); };
+    lista.appendChild(li);
+  });
+  lista.style.display = 'block';
+};
+
+window.registrarAlumno = async function() {
+  const nombre = document.getElementById('al-nombre').value.trim();
+  if (!nombre || nombre.length < 2) {
+    showMsg('al-msg', 'Buscá y seleccioná tu nombre de la lista.', 'msg-cerr'); return;
+  }
+  if (ALUMNOS.length > 0 && !ALUMNOS.some(a => norm(a) === norm(nombre))) {
+    showMsg('al-msg', 'Tu nombre no está en la lista. Escribí tu apellido y elegí de las sugerencias.', 'msg-cerr'); return;
+  }
+  const btn = document.getElementById('al-btn');
+  btn.disabled = true; btn.textContent = 'Verificando...';
+  try {
+    const deviceId = await getFingerprint();
+    // ← USA fechaArgentina() en lugar de toISOString()
+    const snap = await get(regRef(fechaArgentina()));
+    const existentes = snap.exists() ? snap.val() : {};
+    if (Object.values(existentes).some(r => norm(r.nombre) === norm(nombre))) {
+      showMsg('al-msg', '✓ Tu asistencia ya fue registrada hoy. ¡Gracias!', 'msg-dup'); return;
+    }
+    const regDisp = Object.values(existentes).find(r => r.deviceId === deviceId);
+    if (regDisp) {
+      showMsg('al-msg', `Este celular ya registró asistencia hoy (${regDisp.nombre}). No se puede registrar dos veces.`, 'msg-cerr'); return;
+    }
+    const hora = horaArgentina();
+    const estado = calcEstado(hora);
+    const id = Date.now().toString();
+    // ← Guarda con fechaArgentina()
+    await set(regIdRef(fechaArgentina(), id), { nombre, hora, estado, origen:'QR', fecha:fechaArgentina(), deviceId });
+    document.getElementById('al-nombre').value = '';
+    const msgs = { presente:'✓ ¡Asistencia registrada! Estás presente.', tardanza:'⚠ Registrado con tardanza.', ausente:'✗ Registro tardío. Figurás como ausente.' };
+    const cls  = { presente:'msg-ok', tardanza:'msg-tarde', ausente:'msg-cerr' };
+    showMsg('al-msg', msgs[estado], cls[estado]);
+  } catch(e) {
+    showMsg('al-msg', 'Error de conexión. Intentá de nuevo.', 'msg-cerr');
+    btn.disabled = false; btn.textContent = 'Registrar asistencia';
+  }
+};
+
+// ════════════════════════════════════════════════════════════
+//  LOGIN
+// ════════════════════════════════════════════════════════════
+window.login = function() {
+  const v = document.getElementById('login-clave').value;
+  if (v === CFG.clave) {
+    sessionStorage.setItem('doc_ok','1');
+    document.getElementById('vista-login').style.display = 'none';
+    mostrarDocente();
+  } else { showMsg('login-msg','Clave incorrecta.','msg-cerr'); }
+};
+
+// ════════════════════════════════════════════════════════════
+//  PANEL DOCENTE
+// ════════════════════════════════════════════════════════════
+function mostrarDocente() {
+  document.getElementById('vista-docente').style.display = 'block';
+  actualizarHeader();
+  llenarFormConfig();
+  renderListaAlumnos();
+  const hn = new Date();
+  vistaActualMes = { anio: hn.getFullYear(), mes: hn.getMonth() };
+  // ← Usa fechaArgentina() para mostrar la fecha correcta
+  document.getElementById('fecha-hoy').textContent =
+    new Date().toLocaleDateString('es-AR', {weekday:'long', day:'numeric', month:'long', year:'numeric'});
+  escucharHoy();
+  renderMes();
+}
+
+function actualizarHeader() {
+  document.getElementById('doc-titulo').textContent = (CFG.materia||'Asistencia') + (CFG.curso ? ' — ' + CFG.curso : '');
+  document.getElementById('doc-sub').textContent = (CFG.docente||'') + (CFG.escuela ? ' · ' + CFG.escuela : '');
+}
+
+function escucharHoy() {
+  if (unsubHoy) unsubHoy();
+  // ← Escucha el nodo del día en hora Argentina
+  unsubHoy = onValue(regRef(fechaArgentina()), snap => {
+    registrosHoy = snap.exists() ? snap.val() : {};
+    renderHoy();
+  });
+}
+
+// ── Tabla hoy ─────────────────────────────────────────────────
+function renderHoy() {
+  const filtro = document.getElementById('buscador-hoy')?.value || '';
+  const arr = Object.entries(registrosHoy)
+    .map(([id,r]) => ({id,...r}))
+    .filter(r => norm(r.nombre).includes(norm(filtro)))
+    .sort((a,b) => a.hora.localeCompare(b.hora));
+
+  let p=0,t=0,a=0;
+  Object.values(registrosHoy).forEach(r => { if(r.estado==='presente')p++; else if(r.estado==='tardanza')t++; else a++; });
+  document.getElementById('h-p').textContent = p;
+  document.getElementById('h-t').textContent = t;
+  document.getElementById('h-a').textContent = a;
+  document.getElementById('h-total').textContent = Object.keys(registrosHoy).length;
+
+  // Alumnos sin registrar
+  const regNorm = new Set(Object.values(registrosHoy).map(r => norm(r.nombre)));
+  const sinReg  = ALUMNOS.filter(a => !regNorm.has(norm(a)));
+  const divSR   = document.getElementById('sin-registrar');
+  if (sinReg.length && ALUMNOS.length) {
+    divSR.style.display = 'block';
+    document.getElementById('sin-registrar-count').textContent = sinReg.length;
+    document.getElementById('sin-registrar-lista').innerHTML = sinReg.map(n => `<span class="chip-ausente">${n}</span>`).join('');
+  } else { divSR.style.display = 'none'; }
+
+  const tbody = document.getElementById('tbody-hoy'); tbody.innerHTML = '';
+  if (!Object.keys(registrosHoy).length) {
+    document.getElementById('hoy-vacio').style.display = 'block';
+    document.getElementById('tabla-hoy').style.display = 'none'; return;
+  }
+  document.getElementById('hoy-vacio').style.display = 'none';
+  document.getElementById('tabla-hoy').style.display = 'table';
+
+  const todosIds   = arr.filter(r => r.deviceId).map(r => r.deviceId);
+  const idsRep     = new Set(todosIds.filter((id,i) => todosIds.indexOf(id) !== i));
+
+  arr.forEach(r => {
+    const esRep = r.deviceId && idsRep.has(r.deviceId);
+    const devLbl = r.deviceId
+      ? `<span title="ID: ${r.deviceId}" style="font-family:monospace;font-size:10px;color:${esRep?'#c62828':'#aaa'}">${esRep?'⚠ ':''}${r.deviceId.slice(0,8)}</span>`
+      : `<span style="font-size:10px;color:#aaa">—</span>`;
+    const tr = document.createElement('tr');
+    if (esRep) tr.style.background = '#fff8f0';
+    tr.innerHTML = `
+      <td style="font-weight:500">${esc(r.nombre)}</td>
+      <td style="color:#6e6e73;font-variant-numeric:tabular-nums">${r.hora}</td>
+      <td><span class="badge badge-${r.estado}">${r.estado}</span></td>
+      <td><span class="badge badge-${r.origen==='QR'?'qr':'manual'}">${r.origen}</span></td>
+      <td>${devLbl}</td>
+      <td>
+        <select style="font-size:11px;padding:2px 6px;border:1px solid #d0d0d5;border-radius:5px;outline:none;background:#fff"
+          onchange="cambiarEst('${r.id}','${fechaArgentina()}',this.value)">
+          <option value="presente" ${r.estado==='presente'?'selected':''}>Presente</option>
+          <option value="tardanza" ${r.estado==='tardanza'?'selected':''}>Tardanza</option>
+          <option value="ausente"  ${r.estado==='ausente' ?'selected':''}>Ausente</option>
+        </select>
+        <button class="btn-small btn-small-rojo" onclick="eliminarR('${r.id}','${fechaArgentina()}')" style="margin-left:5px">×</button>
+      </td>`;
+    tbody.appendChild(tr);
+  });
+}
+
+window.cambiarEst = async function(id, fecha, estado) {
+  const snap = await get(regIdRef(fecha, id)); if (!snap.exists()) return;
+  await set(regIdRef(fecha, id), {...snap.val(), estado});
+};
+window.eliminarR = async function(id, fecha) {
+  if (!confirm('¿Eliminar este registro?')) return;
+  await remove(regIdRef(fecha, id));
+};
+
+window.marcarAusentes = async function() {
+  if (!ALUMNOS.length) { alert('Primero cargá la lista de alumnos.'); return; }
+  const reg = new Set(Object.values(registrosHoy).map(r => norm(r.nombre)));
+  const sin = ALUMNOS.filter(a => !reg.has(norm(a)));
+  if (!sin.length) { alert('Todos ya tienen registro hoy.'); return; }
+  if (!confirm(`¿Marcar como AUSENTES a ${sin.length} alumnos sin registro?`)) return;
+  const ps = sin.map(nombre => {
+    const id = Date.now().toString() + Math.random().toString(36).slice(2,5);
+    return set(regIdRef(fechaArgentina(), id), { nombre, hora:'--:--', estado:'ausente', origen:'Manual', fecha:fechaArgentina() });
+  });
+  await Promise.all(ps);
+};
+
+// ── Agregar manual ────────────────────────────────────────────
+window.abrirManual = function() {
+  document.getElementById('m-nombre').value = '';
+  document.getElementById('m-sugerencias').innerHTML = '';
+  document.getElementById('m-sugerencias').style.display = 'none';
+  document.getElementById('m-hora').value = horaArgentina();
+  document.getElementById('m-estado').value = 'auto';
+  abrirOv('ov-manual');
+  setTimeout(() => document.getElementById('m-nombre').focus(), 100);
+};
+window.filtrarSugerenciasManual = function() {
+  const val = document.getElementById('m-nombre').value;
+  const lista = document.getElementById('m-sugerencias'); lista.innerHTML = '';
+  if (!val || val.length < 2 || !ALUMNOS.length) { lista.style.display='none'; return; }
+  const q = norm(val);
+  const matches = ALUMNOS.filter(a => norm(a).includes(q)).slice(0, 6);
+  if (!matches.length) { lista.style.display='none'; return; }
+  matches.forEach(alumno => {
+    const li = document.createElement('li'); li.textContent = alumno;
+    li.onclick = () => { document.getElementById('m-nombre').value=alumno; lista.style.display='none'; };
+    lista.appendChild(li);
+  });
+  lista.style.display = 'block';
+};
+window.agregarManual = async function() {
+  const nombre = document.getElementById('m-nombre').value.trim();
+  if (!nombre) { alert('Escribí el nombre.'); return; }
+  const hora   = document.getElementById('m-hora').value || horaArgentina();
+  const sel    = document.getElementById('m-estado').value;
+  const estado = sel === 'auto' ? calcEstado(hora) : sel;
+  const id     = Date.now().toString();
+  await set(regIdRef(fechaArgentina(), id), { nombre, hora, estado, origen:'Manual', fecha:fechaArgentina() });
+  cerrarOv('ov-manual');
+};
+
+// ════════════════════════════════════════════════════════════
+//  LISTA DE ALUMNOS
+// ════════════════════════════════════════════════════════════
+function renderListaAlumnos() {
+  const ul    = document.getElementById('lista-alumnos-ul'); ul.innerHTML = '';
+  const badge = document.getElementById('badge-cant-alumnos');
+  if (badge) badge.textContent = ALUMNOS.length;
+  if (!ALUMNOS.length) {
+    ul.innerHTML = '<li style="color:#6e6e73;font-size:13px;padding:8px 0">Aún no hay alumnos cargados.</li>'; return;
+  }
+  ALUMNOS.forEach((a, i) => {
+    const li = document.createElement('li');
+    li.style.cssText = 'display:flex;align-items:center;justify-content:space-between;padding:7px 0;border-bottom:1px solid #f0f0f0;font-size:14px';
+    li.innerHTML = `<span>${i+1}. ${a}</span><button class="btn-small btn-small-rojo" onclick="eliminarAlumno(${i})">×</button>`;
+    ul.appendChild(li);
+  });
+}
+window.eliminarAlumno = async function(idx) {
+  if (!confirm(`¿Eliminar a "${ALUMNOS[idx]}"?`)) return;
+  ALUMNOS.splice(idx, 1);
+  await set(alumnosRef(), ALUMNOS);
+  renderListaAlumnos();
+};
+window.agregarAlumnoManual = async function() {
+  const input  = document.getElementById('nuevo-alumno-input');
+  const nombre = input.value.trim();
+  if (!nombre) { alert('Escribí el nombre del alumno.'); return; }
+  if (ALUMNOS.some(a => norm(a) === norm(nombre))) { alert('Ese alumno ya está en la lista.'); return; }
+  ALUMNOS.push(nombre); ALUMNOS.sort();
+  await set(alumnosRef(), ALUMNOS);
+  input.value = '';
+  renderListaAlumnos();
+};
+window.subirExcelAlumnos = async function(e) {
+  const file = e.target.files[0]; if (!file) return;
+  const reader = new FileReader();
+  reader.onload = async evt => {
+    try {
+      const wb   = window.XLSX.read(evt.target.result, {type:'array'});
+      const ws   = wb.Sheets[wb.SheetNames[0]];
+      const data = window.XLSX.utils.sheet_to_json(ws, {header:1, defval:''});
+      const nuevos = [];
+      data.forEach(row => {
+        const val = String(row[0]||'').trim();
+        if (!val) return;
+        const n = norm(val);
+        if (['apellido y nombre','apellido','nombre','lista de alumnos','alumnos'].includes(n)) return;
+        if (val.startsWith('→')) return;
+        nuevos.push(val);
+      });
+      if (!nuevos.length) { alert('No se encontraron nombres en la columna A.'); return; }
+      if (confirm(`Se encontraron ${nuevos.length} alumnos.\n\nOK = Reemplazar lista actual\nCancelar = Agregar a la existente`)) {
+        ALUMNOS = nuevos;
+      } else {
+        nuevos.forEach(n => { if (!ALUMNOS.some(a => norm(a)===norm(n))) ALUMNOS.push(n); });
+        ALUMNOS.sort();
+      }
+      await set(alumnosRef(), ALUMNOS);
+      renderListaAlumnos();
+      alert(`✓ Lista actualizada. ${ALUMNOS.length} alumnos en total.`);
+    } catch(err) { alert('Error al leer el archivo. Verificá que sea un .xlsx válido.'); }
+  };
+  reader.readAsArrayBuffer(file);
+  e.target.value = '';
+};
+
+// ════════════════════════════════════════════════════════════
+//  VISTA MENSUAL
+// ════════════════════════════════════════════════════════════
+const MESES_ES = ['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'];
+const DIAS_ES  = ['Dom','Lun','Mar','Mié','Jue','Vie','Sáb'];
+
+function tipoDia(fechaStr) {
+  if (FERIADOS[fechaStr]) return { tipo:'feriado', label: FERIADOS[fechaStr] };
+  const dow = new Date(fechaStr + 'T12:00').getDay();
+  if (dow===0) return { tipo:'domingo', label:'DOMINGO' };
+  if (dow===6) return { tipo:'sabado',  label:'SÁBADO' };
+  if (dow===5) return { tipo:'viernes', label:'VIERNES' };
+  return { tipo:'clase', label: DIAS_ES[dow] };
+}
+
+async function renderMes() {
+  if (!vistaActualMes) return;
+  const {anio, mes} = vistaActualMes;
+  document.getElementById('mes-label').textContent      = MESES_ES[mes] + ' ' + anio;
+  document.getElementById('chip-mes-tabla').textContent = MESES_ES[mes] + ' ' + anio;
+
+  const diasEnMes = new Date(anio, mes+1, 0).getDate();
+  const promesas  = [];
+  for (let d=1; d<=diasEnMes; d++) {
+    const f = `${anio}-${String(mes+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+    promesas.push(get(regRef(f)).then(s => ({fecha:f, data: s.exists() ? s.val() : {}})));
+  }
+  const res = await Promise.all(promesas);
+  const datosMes = {};
+  res.forEach(({fecha, data}) => { if (Object.keys(data).length) datosMes[fecha] = data; });
+  renderCalendario(anio, mes, datosMes);
+  renderTablaMensual(anio, mes, datosMes);
+}
+
+function renderCalendario(anio, mes, datosMes) {
+  const cal = document.getElementById('calendario'); cal.innerHTML = '';
+  DIAS_ES.forEach(d => { const h=document.createElement('div');h.className='cal-header';h.textContent=d;cal.appendChild(h); });
+  const primerDia = new Date(anio, mes, 1).getDay();
+  const diasEnMes = new Date(anio, mes+1, 0).getDate();
+  const hoyStr    = fechaArgentina(); // ← fecha local Argentina
+  for (let i=0; i<primerDia; i++) { const v=document.createElement('div');v.className='cal-dia vacio-cal';cal.appendChild(v); }
+  for (let d=1; d<=diasEnMes; d++) {
+    const f  = `${anio}-${String(mes+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+    const rs = datosMes[f] ? Object.values(datosMes[f]) : [];
+    const td = tipoDia(f);
+    const div = document.createElement('div'); div.className = 'cal-dia';
+    if (f === hoyStr)           div.classList.add('hoy');
+    if (rs.length)              div.classList.add('tiene-datos');
+    if (diaSeleccionado === f)  div.classList.add('seleccionado');
+    if (td.tipo !== 'clase')    div.classList.add('cal-no-clase');
+    const num = document.createElement('div'); num.className='cal-num'; num.textContent=d; div.appendChild(num);
+    if (td.tipo !== 'clase') { const lbl=document.createElement('div');lbl.className='cal-feriado-lbl';lbl.textContent=td.tipo==='feriado'?'Fer.':td.label.slice(0,3);div.appendChild(lbl); }
+    if (rs.length) {
+      const p=rs.filter(r=>r.estado==='presente').length, t=rs.filter(r=>r.estado==='tardanza').length, a=rs.filter(r=>r.estado==='ausente').length;
+      const badges=document.createElement('div');badges.className='cal-mini-badges';
+      if(p){const s=document.createElement('span');s.className='mini-p';s.textContent=p+'P';badges.appendChild(s);}
+      if(t){const s=document.createElement('span');s.className='mini-t';s.textContent=t+'T';badges.appendChild(s);}
+      if(a){const s=document.createElement('span');s.className='mini-a';s.textContent=a+'A';badges.appendChild(s);}
+      div.appendChild(badges);
+      div.onclick = () => mostrarDetalleDia(f, d, mes, anio, datosMes[f]||{});
+    }
+    cal.appendChild(div);
+  }
+}
+
+function mostrarDetalleDia(f, d, mes, anio, datos) {
+  diaSeleccionado = f;
+  document.getElementById('detalle-dia-titulo').textContent = 'Detalle — ' + d + ' de ' + MESES_ES[mes] + ' ' + anio;
+  const tbody = document.getElementById('tbody-detalle'); tbody.innerHTML = '';
+  const arr = Object.values(datos).sort((a,b) => a.hora.localeCompare(b.hora));
+  if (!arr.length) { tbody.innerHTML='<tr><td colspan="4" style="text-align:center;padding:20px;color:#6e6e73">Sin registros</td></tr>'; }
+  else arr.forEach(r => {
+    const tr=document.createElement('tr');
+    tr.innerHTML=`<td style="font-weight:500">${esc(r.nombre)}</td><td style="color:#6e6e73">${r.hora}</td><td><span class="badge badge-${r.estado}">${r.estado}</span></td><td><span class="badge badge-${r.origen==='QR'?'qr':'manual'}">${r.origen}</span></td>`;
+    tbody.appendChild(tr);
+  });
+  document.getElementById('card-detalle-dia').style.display = 'block';
+}
+window.cerrarDetalle = function() { document.getElementById('card-detalle-dia').style.display='none'; diaSeleccionado=null; };
+
+function renderTablaMensual(anio, mes, datosMes) {
+  const fechas = [];
+  const diasEnMes = new Date(anio, mes+1, 0).getDate();
+  for (let d=1; d<=diasEnMes; d++) {
+    fechas.push(`${anio}-${String(mes+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`);
+  }
+  // Solo mostrar fechas que son días de clase (lun-jue)
+  const fechasClase = fechas.filter(f => tipoDia(f).tipo === 'clase');
+
+  const alumnosSet = new Set(ALUMNOS);
+  fechas.forEach(f => { if(datosMes[f]) Object.values(datosMes[f]).forEach(r => alumnosSet.add(r.nombre)); });
+  const alumnos = Array.from(alumnosSet).sort();
+
+  if (!alumnos.length) {
+    document.getElementById('tabla-mensual').style.display='none';
+    document.getElementById('vacio-mensual').style.display='block'; return;
+  }
+  document.getElementById('tabla-mensual').style.display = 'table';
+  document.getElementById('vacio-mensual').style.display = 'none';
+
+  const thead = document.getElementById('thead-mensual'); thead.innerHTML='';
+  const trH   = document.createElement('tr');
+  const thN   = document.createElement('th'); thN.textContent='Alumno'; thN.className='col-nombre'; trH.appendChild(thN);
+
+  // Mostrar TODOS los días pero resaltar los no-clase
+  fechas.forEach(f => {
+    const th  = document.createElement('th'); th.style.textAlign='center';
+    const td  = tipoDia(f);
+    const dNum = parseInt(f.split('-')[2]);
+    th.textContent = dNum;
+    th.title = td.tipo !== 'clase' ? td.label : td.label;
+    if (td.tipo !== 'clase') { th.style.background='#f5f5f7'; th.style.color='#aaa'; th.style.fontSize='10px'; }
+    trH.appendChild(th);
+  });
+  ['P','T','A','%'].forEach(l => { const th=document.createElement('th');th.textContent=l;th.style.textAlign='center';trH.appendChild(th); });
+  thead.appendChild(trH);
+
+  const diasHabiles = fechasClase.length;
+  const tbody = document.getElementById('tbody-mensual'); tbody.innerHTML = '';
+  alumnos.forEach(alumno => {
+    const tr = document.createElement('tr');
+    const tdN = document.createElement('td'); tdN.textContent=alumno; tdN.className='col-nombre'; tr.appendChild(tdN);
+    let tp=0, tt=0, ta=0;
+    fechas.forEach(f => {
+      const td   = tipoDia(f);
+      const cell = document.createElement('td');
+      if (td.tipo !== 'clase') {
+        cell.style.cssText = 'background:#f5f5f7;text-align:center;font-size:9px;color:#bbb';
+        cell.textContent = td.tipo==='feriado'?'FER': td.tipo==='sabado'?'SÁB': td.tipo==='domingo'?'DOM':'VIE';
+      } else {
+        const reg = datosMes[f] ? Object.values(datosMes[f]).find(r => norm(r.nombre)===norm(alumno)) : null;
+        if (reg) {
+          cell.textContent = reg.estado==='presente'?'P': reg.estado==='tardanza'?'T':'A';
+          cell.className   = reg.estado==='presente'?'celda-p': reg.estado==='tardanza'?'celda-t':'celda-a';
+          if (reg.estado==='presente') tp++; else if (reg.estado==='tardanza') tt++; else ta++;
+        } else { cell.className='celda-vacia'; cell.textContent='—'; }
+      }
+      tr.appendChild(cell);
+    });
+    const pct    = diasHabiles > 0 ? Math.round((tp/diasHabiles)*100) : 0;
+    const colPct = pct>=75?'#2e7d32': pct>=50?'#e65100':'#c62828';
+    [tp,tt,ta].forEach((v,i) => { const c=document.createElement('td');c.textContent=v;c.style.cssText=`text-align:center;font-weight:600;color:${['#2e7d32','#e65100','#c62828'][i]}`;tr.appendChild(c); });
+    const cPct = document.createElement('td'); cPct.textContent=pct+'%'; cPct.style.cssText=`text-align:center;font-weight:700;color:${colPct}`; tr.appendChild(cPct);
+    tbody.appendChild(tr);
+  });
+}
+
+window.cambiarMes = async function(delta) {
+  let {anio, mes} = vistaActualMes; mes += delta;
+  if (mes < 0)  { mes=11; anio--; } if (mes > 11) { mes=0; anio++; }
+  vistaActualMes = {anio, mes}; diaSeleccionado = null;
+  document.getElementById('card-detalle-dia').style.display = 'none';
+  await renderMes();
+};
+
+// ════════════════════════════════════════════════════════════
+//  EXPORTAR EXCEL
+// ════════════════════════════════════════════════════════════
+window.abrirExport = function() { abrirOv('ov-export'); };
+
+window.exportar = async function(tipo) {
+  cerrarOv('ov-export');
+  const {anio, mes} = vistaActualMes;
+  const wb = window.XLSX.utils.book_new();
+  if (tipo === 'hoy') {
+    const rs = Object.values(registrosHoy);
+    if (!rs.length) { alert('No hay registros para hoy.'); return; }
+    agregarHoja(wb, fechaArgentina(), rs);
+    window.XLSX.writeFile(wb, `Asistencia_hoy_${fechaArgentina()}.xlsx`); return;
+  }
+  const diasEnMes = new Date(anio, mes+1, 0).getDate();
+  const fechas=[]; const datosMes={};
+  for (let d=1; d<=diasEnMes; d++) {
+    const f = `${anio}-${String(mes+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+    fechas.push(f);
+    const s = await get(regRef(f)); datosMes[f] = s.exists() ? Object.values(s.val()) : [];
+  }
+  if (tipo === 'planilla') {
+    agregarPlanilla(wb, anio, mes, fechas, datosMes);
+    window.XLSX.writeFile(wb, `Planilla_${(CFG.curso||'').replace(/\s/g,'_')}_${MESES_ES[mes]}_${anio}.xlsx`);
+  } else if (tipo === 'mes-hojas') {
+    fechas.forEach(f => { if(datosMes[f].length) agregarHoja(wb, f, datosMes[f]); });
+    if (!wb.SheetNames.length) { alert('No hay registros en este mes.'); return; }
+    window.XLSX.writeFile(wb, `Asistencia_${(CFG.curso||'').replace(/\s/g,'_')}_${MESES_ES[mes]}_${anio}.xlsx`);
+  }
+};
+
+function agregarHoja(wb, fechaStr, registros) {
+  const {utils}   = window.XLSX;
+  const fecha     = new Date(fechaStr + 'T12:00');
+  const mesN      = fecha.getMonth(), anioN = fecha.getFullYear();
+  const diasEnMes = new Date(anioN, mesN+1, 0).getDate();
+  const base      = ALUMNOS.length ? ALUMNOS : [...new Set(registros.map(r=>r.nombre))].sort();
+  const aoa = [
+    [`REGISTRO DE ASISTENCIA ${anioN}`],
+    ['', CFG.curso, CFG.materia, '', 'Total de asistencia'],
+    ['', 'Docente:', CFG.docente, CFG.escuela||'', 'Total de inasistencia'],
+    ['', '', '', '', 'Asistencia Media (%)'],
+    ['', '', '', '', 'Asistencias esperadas'],
+  ];
+  const filaDias=['Orden','Apellido y Nombre','DNI',MESES_ES[mesN].toUpperCase()];
+  const filaNom=['','','',''];
+  for(let d=1;d<=diasEnMes;d++){
+    const f=`${anioN}-${String(mesN+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+    filaDias.push(d); filaNom.push(tipoDia(f).label.slice(0,3));
+  }
+  filaDias.push('Pres.','Tard.','Aus.','% Asist.'); filaNom.push('','','','');
+  aoa.push(filaDias); aoa.push(filaNom);
+  const diasH = [];
+  for(let d=1;d<=diasEnMes;d++){const f=`${anioN}-${String(mesN+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;if(tipoDia(f).tipo==='clase')diasH.push(d);}
+  base.forEach((nombre,i) => {
+    const reg = registros.find(r => norm(r.nombre)===norm(nombre));
+    const fila = [i+1, nombre, '', ''];
+    for(let d=1;d<=diasEnMes;d++){
+      const f=`${anioN}-${String(mesN+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+      const td=tipoDia(f);
+      if(td.tipo==='sabado')fila.push('SAB');
+      else if(td.tipo==='domingo')fila.push('DOM');
+      else if(td.tipo==='feriado')fila.push('FER');
+      else if(td.tipo==='viernes')fila.push('');
+      else fila.push(reg&&reg.fecha===f?(reg.estado==='presente'?'P':reg.estado==='tardanza'?'T':'A'):'');
+    }
+    const p=reg&&reg.estado==='presente'?1:0,t=reg&&reg.estado==='tardanza'?1:0,a=reg&&reg.estado==='ausente'?1:0;
+    fila.push(p,t,a,diasH.length>0?Math.round((p/diasH.length)*100)+'%':'0%');
+    aoa.push(fila);
+  });
+  const ws=utils.aoa_to_sheet(aoa);
+  ws['!cols']=[{wch:6},{wch:30},{wch:12},{wch:12},...Array(diasEnMes).fill({wch:4.5}),{wch:7},{wch:7},{wch:7},{wch:9}];
+  utils.book_append_sheet(wb,ws,fecha.toLocaleDateString('es-AR',{day:'2-digit',month:'2-digit'}));
+}
+
+function agregarPlanilla(wb, anio, mes, fechas, datosMes) {
+  const {utils} = window.XLSX;
+  const alumnosSet = new Set(ALUMNOS);
+  fechas.forEach(f => datosMes[f].forEach(r => alumnosSet.add(r.nombre)));
+  const alumnos = Array.from(alumnosSet).sort();
+  if (!alumnos.length) { alert('No hay alumnos ni registros en este mes.'); return; }
+  const aoa = [
+    [`REGISTRO DE ASISTENCIA ${anio}`],
+    ['', CFG.curso, CFG.materia, '', 'Total de asistencia'],
+    ['', 'Docente:', CFG.docente, CFG.escuela||'', 'Total de inasistencia'],
+    ['', '', '', '', 'Asistencia Media (%)'],
+    ['', '', '', '', 'Asistencias esperadas'],
+  ];
+  const filaCols=['Orden','Apellido y Nombre','DNI',MESES_ES[mes].toUpperCase()];
+  const filaNom=['','','',''];
+  fechas.forEach(f=>{filaCols.push(parseInt(f.split('-')[2]));filaNom.push(tipoDia(f).label.slice(0,3));});
+  filaCols.push('Pres.','Tard.','Aus.','% Asist.'); filaNom.push('','','','');
+  aoa.push(filaCols); aoa.push(filaNom);
+  const diasHabiles = fechas.filter(f=>tipoDia(f).tipo==='clase').length;
+  alumnos.forEach((alumno,i) => {
+    const fila=[i+1,alumno,'','']; let tp=0,tt=0,ta=0;
+    fechas.forEach(f=>{
+      const td=tipoDia(f);
+      if(td.tipo==='sabado')fila.push('SAB');
+      else if(td.tipo==='domingo')fila.push('DOM');
+      else if(td.tipo==='feriado')fila.push('FER');
+      else if(td.tipo==='viernes')fila.push('');
+      else{const reg=datosMes[f].find(r=>norm(r.nombre)===norm(alumno));if(reg){const m=reg.estado==='presente'?'P':reg.estado==='tardanza'?'T':'A';fila.push(m);if(reg.estado==='presente')tp++;else if(reg.estado==='tardanza')tt++;else ta++;}else fila.push('');}
+    });
+    fila.push(tp,tt,ta,diasHabiles>0?Math.round((tp/diasHabiles)*100)+'%':'0%');
+    aoa.push(fila);
+  });
+  const ws=utils.aoa_to_sheet(aoa);
+  ws['!cols']=[{wch:6},{wch:30},{wch:12},{wch:12},...Array(fechas.length).fill({wch:4.5}),{wch:7},{wch:7},{wch:7},{wch:9}];
+  utils.book_append_sheet(wb,ws,MESES_ES[mes].substring(0,10));
+}
+
+// ════════════════════════════════════════════════════════════
+//  CONFIGURACIÓN
+// ════════════════════════════════════════════════════════════
+function llenarFormConfig() {
+  ['curso','materia','docente','escuela','inicio','tolerancia','cierre','clave']
+    .forEach(k => { const el=document.getElementById('cfg-'+k); if(el) el.value=CFG[k]||''; });
+}
+window.guardarCfg = async function() {
+  const nueva = {};
+  ['curso','materia','docente','escuela','inicio','tolerancia','cierre','clave']
+    .forEach(k => { nueva[k]=document.getElementById('cfg-'+k).value.trim(); });
+  await set(cfgRef(), nueva); CFG = nueva; actualizarHeader();
+  const m=document.getElementById('cfg-msg');
+  m.textContent='✓ Guardado en la nube. Todos los dispositivos verán el cambio.';
+  setTimeout(()=>m.textContent='',3500);
+};
+
+// ════════════════════════════════════════════════════════════
+//  QR
+// ════════════════════════════════════════════════════════════
+window.verLinkQR = function() {
+  const base = window.location.href.split('?')[0];
+  document.getElementById('qr-link-text').textContent = base + '?alumno=1';
+  abrirOv('ov-qr');
+};
+window.copiarLink = function() {
+  navigator.clipboard.writeText(document.getElementById('qr-link-text').textContent)
+    .then(() => alert('¡Copiado! Pegalo en qr.io para generar el QR.'));
+};
+
+// ════════════════════════════════════════════════════════════
+//  HELPERS
+// ════════════════════════════════════════════════════════════
+window.tab = function(nombre) {
+  document.querySelectorAll('.tab,.panel').forEach(e => e.classList.remove('active'));
+  document.getElementById('tab-'+nombre).classList.add('active');
+  document.querySelectorAll('.tab')[['hoy','mes','alumnos','config'].indexOf(nombre)].classList.add('active');
+  if (nombre==='mes') renderMes();
+};
+function abrirOv(id)  { document.getElementById(id).classList.add('visible'); }
+window.cerrarOv = id => document.getElementById(id).classList.remove('visible');
+window.filtrarTabla   = () => renderHoy();
+function showMsg(id,txt,cls) { const m=document.getElementById(id);m.textContent=txt;m.className='msg-r '+cls;m.style.display='block'; }
+function esc(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+// Cerrar autocomplete al hacer clic afuera
+document.addEventListener('click', e => {
+  if (!e.target.closest('.autocomplete-wrap'))
+    document.querySelectorAll('.autocomplete-lista').forEach(l => l.style.display='none');
+});
+</script>
+
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#f5f5f7;color:#1d1d1f}
+header{background:#fff;border-bottom:1px solid #e0e0e0;padding:12px 20px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;position:sticky;top:0;z-index:100}
+.header-left h1{font-size:17px;font-weight:600}.header-left p{font-size:13px;color:#6e6e73;margin-top:2px}
+.header-btns{display:flex;gap:8px;flex-wrap:wrap}
+.btn{padding:8px 14px;border-radius:8px;border:1px solid #d0d0d5;background:#fff;font-size:13px;cursor:pointer;font-weight:500;transition:background .15s;white-space:nowrap}
+.btn:hover{background:#f0f0f5}
+.btn-blue{background:#0071e3;color:#fff;border-color:#0071e3}.btn-blue:hover{background:#005ec3}
+.btn-purple{background:#6f42c1;color:#fff;border-color:#6f42c1}.btn-purple:hover{background:#5a32a3}
+.btn-orange{background:#e65100;color:#fff;border-color:#e65100}.btn-orange:hover{background:#bf360c}
+.tabs{display:flex;gap:4px;padding:12px 20px 0;border-bottom:1px solid #e0e0e0;background:#fff;overflow-x:auto}
+.tab{padding:8px 16px;border-radius:8px 8px 0 0;font-size:14px;cursor:pointer;color:#6e6e73;border:1px solid transparent;border-bottom:none;white-space:nowrap}
+.tab.active{background:#f5f5f7;color:#1d1d1f;font-weight:600;border-color:#e0e0e0}
+.content{padding:20px;max-width:960px;margin:0 auto}
+.panel{display:none}.panel.active{display:block}
+.metricas{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px}
+.metrica{background:#fff;border-radius:12px;padding:14px;border:1px solid #e0e0e0;text-align:center}
+.metrica-val{font-size:28px;font-weight:700}.metrica-lbl{font-size:11px;color:#6e6e73;margin-top:4px}
+.verde{color:#28a745}.naranja{color:#ff9500}.rojo{color:#d32f2f}.azul{color:#0071e3}
+.card{background:#fff;border-radius:12px;border:1px solid #e0e0e0;overflow:hidden;margin-bottom:16px}
+.card-header{padding:12px 20px;border-bottom:1px solid #e0e0e0;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px}
+.card-header h2{font-size:15px;font-weight:600}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{padding:9px 14px;text-align:left;background:#f9f9fb;font-size:11px;font-weight:600;color:#6e6e73;text-transform:uppercase;border-bottom:1px solid #e0e0e0;white-space:nowrap}
+td{padding:10px 14px;border-bottom:1px solid #f0f0f0;vertical-align:middle}
+tr:last-child td{border-bottom:none}tr:hover td{background:#fafafa}
+.badge{display:inline-block;padding:2px 9px;border-radius:99px;font-size:11px;font-weight:600}
+.badge-presente{background:#e8f5e9;color:#2e7d32}.badge-tardanza{background:#fff3e0;color:#e65100}
+.badge-ausente{background:#ffebee;color:#c62828}.badge-manual{background:#ede7f6;color:#4527a0}
+.badge-qr{background:#e3f2fd;color:#1565c0}
+.vacio{text-align:center;padding:40px 20px;color:#6e6e73;font-size:14px}
+.autocomplete-wrap{position:relative;width:100%}
+.autocomplete-lista{position:absolute;top:100%;left:0;right:0;background:#fff;border:1.5px solid #0071e3;border-top:none;border-radius:0 0 10px 10px;list-style:none;z-index:50;max-height:260px;overflow-y:auto;box-shadow:0 4px 16px rgba(0,0,0,0.12)}
+.autocomplete-lista li{padding:12px 14px;cursor:pointer;font-size:15px;border-bottom:1px solid #f0f0f0}
+.autocomplete-lista li:last-child{border-bottom:none}
+.autocomplete-lista li:hover{background:#e3f2fd;color:#0071e3}
+#sin-registrar{background:#fff8f0;border:1px solid #ffcc80;border-radius:10px;padding:14px 16px;margin-bottom:16px}
+#sin-registrar h3{font-size:14px;font-weight:600;color:#e65100;margin-bottom:8px}
+.chip-ausente{display:inline-block;background:#ffebee;color:#c62828;font-size:12px;padding:2px 9px;border-radius:99px;margin:2px}
+.alumno-wrap{min-height:100vh;background:#f5f5f7;display:flex;align-items:flex-start;justify-content:center;padding:40px 20px}
+.alumno-card{background:#fff;border-radius:16px;border:1px solid #e0e0e0;padding:32px;max-width:420px;width:100%}
+.alumno-card h2{font-size:22px;font-weight:700;margin-bottom:6px}
+.alumno-card .sub{font-size:14px;color:#6e6e73;margin-bottom:28px}
+.form-label{font-size:14px;font-weight:600;margin-bottom:6px;display:block}
+.form-input{width:100%;padding:12px 14px;border:1.5px solid #d0d0d5;border-radius:10px;font-size:16px;outline:none;transition:border-color .15s;background:#fff;color:#1d1d1f}
+.form-input:focus{border-color:#0071e3;border-radius:10px 10px 0 0}
+.btn-registrar{width:100%;padding:14px;border-radius:10px;background:#0071e3;color:#fff;border:none;font-size:16px;font-weight:600;cursor:pointer;margin-top:16px;transition:background .15s}
+.btn-registrar:hover{background:#005ec3}.btn-registrar:disabled{background:#b0b0b5;cursor:default}
+.msg-r{margin-top:16px;padding:14px;border-radius:10px;font-size:14px;font-weight:500;display:none;text-align:center;line-height:1.5}
+.msg-ok{background:#e8f5e9;color:#2e7d32}.msg-tarde{background:#fff3e0;color:#e65100}
+.msg-cerr{background:#ffebee;color:#c62828}.msg-dup{background:#ede7f6;color:#4527a0}
+.overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,0.45);z-index:200;align-items:center;justify-content:center}
+.overlay.visible{display:flex}
+.modal{background:#fff;border-radius:16px;padding:28px;width:440px;max-width:92vw;max-height:90vh;overflow-y:auto}
+.modal h3{font-size:17px;font-weight:600;margin-bottom:18px}
+.modal-btns{display:flex;gap:10px;margin-top:18px}.modal-btns .btn{flex:1;text-align:center}
+.config-group{margin-bottom:14px}
+.config-group label{font-size:13px;font-weight:600;color:#6e6e73;display:block;margin-bottom:5px}
+.config-group input,.config-group select{width:100%;padding:9px 12px;border:1.5px solid #d0d0d5;border-radius:8px;font-size:14px;outline:none;background:#fff;color:#1d1d1f}
+.config-group input:focus{border-color:#0071e3}
+.config-info{background:#e3f2fd;border-radius:10px;padding:11px 14px;font-size:13px;color:#1565c0;margin-bottom:14px;line-height:1.6}
+.config-info.warn{background:#fff3e0;color:#e65100}
+.config-section{font-size:15px;font-weight:600;margin:18px 0 12px;padding-bottom:8px;border-bottom:1px solid #e0e0e0}
+.config-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+@media(max-width:500px){.config-grid{grid-template-columns:1fr}.metricas{grid-template-columns:1fr 1fr}}
+.btn-small{padding:3px 9px;font-size:11px;border-radius:6px;border:1px solid #d0d0d5;background:#fff;cursor:pointer}
+.btn-small:hover{background:#f0f0f5}.btn-small-rojo{color:#d32f2f;border-color:#f9a8a8}.btn-small-rojo:hover{background:#ffebee}
+.chip-mes{display:inline-block;padding:3px 10px;border-radius:99px;font-size:12px;background:#e3f2fd;color:#1565c0;font-weight:600;margin-left:8px}
+.export-opciones{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:4px}
+.export-opt{border:1.5px solid #d0d0d5;border-radius:10px;padding:14px 12px;cursor:pointer;text-align:center;transition:all .15s}
+.export-opt:hover{border-color:#0071e3;background:#e3f2fd}
+.export-opt h4{font-size:14px;font-weight:600;margin-bottom:4px}.export-opt p{font-size:12px;color:#6e6e73;line-height:1.4}
+.mes-nav{display:flex;align-items:center;gap:12px;margin-bottom:16px}
+.mes-nav button{padding:6px 12px;border:1px solid #d0d0d5;border-radius:8px;background:#fff;cursor:pointer;font-size:14px}
+.mes-nav button:hover{background:#f0f0f5}
+.mes-nav span{font-weight:600;font-size:15px;min-width:180px;text-align:center}
+.cal-wrap{display:grid;grid-template-columns:repeat(7,1fr);gap:4px}
+.cal-header{text-align:center;font-size:11px;font-weight:600;color:#6e6e73;padding:4px 0}
+.cal-dia{border-radius:8px;padding:5px 3px;text-align:center;font-size:12px;cursor:pointer;border:1px solid transparent;transition:all .15s;min-height:52px;display:flex;flex-direction:column;align-items:center;justify-content:flex-start;gap:2px}
+.cal-dia:hover{background:#f0f0f5}.cal-dia.vacio-cal,.cal-dia.cal-no-clase{cursor:default;opacity:.45}
+.cal-dia.hoy{border-color:#0071e3;background:#e3f2fd}
+.cal-dia.seleccionado{border-color:#0071e3;background:#0071e3;color:#fff}
+.cal-dia.tiene-datos{background:#f0faf4;border-color:#a8d5b5}
+.cal-num{font-weight:600;font-size:13px}.cal-feriado-lbl{font-size:9px;color:#e65100;font-weight:600}
+.cal-mini-badges{display:flex;gap:2px;flex-wrap:wrap;justify-content:center}
+.cal-mini-badges span{font-size:9px;padding:1px 4px;border-radius:4px;font-weight:600}
+.mini-p{background:#e8f5e9;color:#2e7d32}.mini-t{background:#fff3e0;color:#e65100}.mini-a{background:#ffebee;color:#c62828}
+.tabla-mes-wrap{overflow-x:auto}
+.tabla-mes th,.tabla-mes td{white-space:nowrap}
+.tabla-mes .col-nombre{position:sticky;left:0;background:#f9f9fb;z-index:2;font-weight:600}
+.tabla-mes td.col-nombre{background:#fff}.tabla-mes tr:hover td.col-nombre{background:#fafafa}
+.celda-p{background:#e8f5e9;color:#2e7d32;text-align:center;font-weight:600;font-size:11px}
+.celda-t{background:#fff3e0;color:#e65100;text-align:center;font-weight:600;font-size:11px}
+.celda-a{background:#ffebee;color:#c62828;text-align:center;font-weight:600;font-size:11px}
+.celda-vacia{text-align:center;color:#ccc}
+.upload-zone{border:2px dashed #d0d0d5;border-radius:12px;padding:28px;text-align:center;cursor:pointer;transition:all .2s;margin-bottom:16px}
+.upload-zone:hover{border-color:#0071e3;background:#e3f2fd}
+.upload-zone p{font-size:14px;color:#6e6e73;margin-top:8px}
+</style>
+</head>
+<body>
+
+<!-- VISTA ALUMNO -->
+<div id="vista-alumno" style="display:none">
+  <div class="alumno-wrap">
+    <div class="alumno-card">
+      <h2 id="al-titulo">Registro de asistencia</h2>
+      <p class="sub" id="al-sub"></p>
+      <label class="form-label">Buscá tu apellido</label>
+      <div class="autocomplete-wrap">
+        <input class="form-input" type="text" id="al-nombre"
+          placeholder="Ej: Fernández..." autocomplete="off" maxlength="80"
+          oninput="filtrarSugerencias()"
+          onkeydown="if(event.key==='Enter')registrarAlumno()">
+        <ul class="autocomplete-lista" id="al-sugerencias" style="display:none"></ul>
+      </div>
+      <button class="btn-registrar" id="al-btn" onclick="registrarAlumno()">Registrar asistencia</button>
+      <div class="msg-r" id="al-msg"></div>
+    </div>
+  </div>
+</div>
+
+<!-- PANEL DOCENTE -->
+<div id="vista-docente" style="display:none">
+  <header>
+    <div class="header-left">
+      <h1 id="doc-titulo">Asistencia</h1>
+      <p id="doc-sub"></p>
+    </div>
+    <div class="header-btns">
+      <button class="btn" onclick="abrirManual()">+ Manual</button>
+      <button class="btn btn-blue" onclick="verLinkQR()">Ver QR</button>
+      <button class="btn btn-purple" onclick="abrirExport()">⬇ Exportar Excel</button>
+    </div>
+  </header>
+  <div class="tabs">
+    <div class="tab active" onclick="tab('hoy')">Hoy</div>
+    <div class="tab" onclick="tab('mes')">Vista mensual</div>
+    <div class="tab" onclick="tab('alumnos')">Lista de alumnos
+      <span id="badge-cant-alumnos" style="background:#e3f2fd;color:#1565c0;font-size:11px;padding:1px 7px;border-radius:99px;font-weight:600;margin-left:4px">0</span>
+    </div>
+    <div class="tab" onclick="tab('config')">Configuración</div>
+  </div>
+  <div class="content">
+
+    <!-- TAB HOY -->
+    <div class="panel active" id="tab-hoy">
+      <div class="metricas">
+        <div class="metrica"><div class="metrica-val verde" id="h-p">0</div><div class="metrica-lbl">Presentes</div></div>
+        <div class="metrica"><div class="metrica-val naranja" id="h-t">0</div><div class="metrica-lbl">Tardanzas</div></div>
+        <div class="metrica"><div class="metrica-val rojo" id="h-a">0</div><div class="metrica-lbl">Ausentes</div></div>
+        <div class="metrica"><div class="metrica-val azul" id="h-total">0</div><div class="metrica-lbl">Total hoy</div></div>
+      </div>
+      <div id="sin-registrar" style="display:none">
+        <h3>⚠ <span id="sin-registrar-count">0</span> alumnos sin registrar hoy</h3>
+        <div id="sin-registrar-lista" style="margin:8px 0 12px"></div>
+        <button class="btn btn-orange" onclick="marcarAusentes()">Marcar todos como Ausentes</button>
+      </div>
+      <div class="card">
+        <div class="card-header">
+          <h2 id="fecha-hoy">Registros de hoy</h2>
+          <input type="text" id="buscador-hoy" placeholder="Buscar alumno..."
+            style="padding:6px 12px;border:1px solid #d0d0d5;border-radius:8px;font-size:13px;outline:none"
+            oninput="filtrarTabla()">
+        </div>
+        <div id="hoy-vacio" class="vacio">
+          Todavía no hay registros hoy.<br>
+          <span style="font-size:12px">Aparecen en tiempo real cuando los alumnos escanean el QR.</span>
+        </div>
+        <div style="overflow-x:auto">
+          <table id="tabla-hoy" style="display:none">
+            <thead><tr><th>Nombre</th><th>Hora</th><th>Estado</th><th>Origen</th><th>Dispositivo</th><th>Acciones</th></tr></thead>
+            <tbody id="tbody-hoy"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- TAB MES -->
+    <div class="panel" id="tab-mes">
+      <div class="mes-nav">
+        <button onclick="cambiarMes(-1)">◀</button>
+        <span id="mes-label"></span>
+        <button onclick="cambiarMes(1)">▶</button>
+      </div>
+      <div class="card" style="padding:16px;margin-bottom:16px">
+        <div class="cal-wrap" id="calendario"></div>
+      </div>
+      <div class="card" id="card-detalle-dia" style="display:none">
+        <div class="card-header">
+          <h2 id="detalle-dia-titulo">Detalle</h2>
+          <button class="btn btn-small" onclick="cerrarDetalle()">Cerrar</button>
+        </div>
+        <div style="overflow-x:auto">
+          <table><thead><tr><th>Nombre</th><th>Hora</th><th>Estado</th><th>Origen</th></tr></thead>
+          <tbody id="tbody-detalle"></tbody></table>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-header">
+          <h2>Planilla mensual <span class="chip-mes" id="chip-mes-tabla"></span></h2>
+          <span style="font-size:12px;color:#6e6e73">P = Presente · T = Tardanza · A = Ausente</span>
+        </div>
+        <div class="tabla-mes-wrap">
+          <table class="tabla-mes" id="tabla-mensual"><thead id="thead-mensual"></thead><tbody id="tbody-mensual"></tbody></table>
+          <div class="vacio" id="vacio-mensual">No hay registros para este mes.</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- TAB ALUMNOS -->
+    <div class="panel" id="tab-alumnos">
+      <div class="card" style="padding:20px">
+        <div class="config-section" style="margin-top:0">Cargar lista desde Excel</div>
+        <div class="config-info">
+          Subí un archivo .xlsx con los apellidos y nombres en la <strong>columna A</strong>, uno por fila.<br>
+          Formato recomendado: <strong>APELLIDO Nombre</strong> (ej: BERRIDO Daniel Fernando)
+        </div>
+        <div class="upload-zone" onclick="document.getElementById('input-excel-alumnos').click()">
+          <div style="font-size:36px">📂</div>
+          <p>Hacé clic para elegir el archivo .xlsx con la lista de alumnos</p>
+          <input type="file" id="input-excel-alumnos" accept=".xlsx,.xls" style="display:none" onchange="subirExcelAlumnos(event)">
+        </div>
+        <div class="config-section">Agregar alumno individual</div>
+        <div style="display:flex;gap:10px;margin-bottom:20px">
+          <input type="text" id="nuevo-alumno-input" placeholder="Ej: GARCIA Juan Manuel"
+            style="flex:1;padding:9px 12px;border:1.5px solid #d0d0d5;border-radius:8px;font-size:14px;outline:none;color:#1d1d1f"
+            onkeydown="if(event.key==='Enter')agregarAlumnoManual()">
+          <button class="btn btn-blue" onclick="agregarAlumnoManual()">Agregar</button>
+        </div>
+        <div class="config-section">Lista actual</div>
+        <ul id="lista-alumnos-ul" style="list-style:none;max-height:420px;overflow-y:auto;padding:0"></ul>
+      </div>
+    </div>
+
+    <!-- TAB CONFIG -->
+    <div class="panel" id="tab-config">
+      <div class="card" style="padding:20px">
+        <div class="config-info">☁ Todo lo que guardés se sincroniza en todos los dispositivos.</div>
+        <div class="config-section">Datos del curso</div>
+        <div class="config-grid">
+          <div class="config-group"><label>Curso / División</label><input type="text" id="cfg-curso"></div>
+          <div class="config-group"><label>Materia</label><input type="text" id="cfg-materia"></div>
+          <div class="config-group"><label>Docente</label><input type="text" id="cfg-docente"></div>
+          <div class="config-group"><label>Escuela (opcional)</label><input type="text" id="cfg-escuela"></div>
+        </div>
+        <div class="config-section">Horarios automáticos</div>
+        <div class="config-info">
+          <b>Presente:</b> llegó antes del fin de tolerancia.<br>
+          <b>Tardanza:</b> llegó después de la tolerancia pero antes del cierre.<br>
+          <b>Ausente:</b> se registró después del cierre.
+        </div>
+        <div class="config-grid">
+          <div class="config-group"><label>Inicio de clase</label><input type="time" id="cfg-inicio"></div>
+          <div class="config-group"><label>Fin de tolerancia (hasta acá = Presente)</label><input type="time" id="cfg-tolerancia"></div>
+          <div class="config-group"><label>Cierre del registro (después = Ausente)</label><input type="time" id="cfg-cierre"></div>
+        </div>
+        <div class="config-section">Acceso docente</div>
+        <div class="config-info warn">Esta clave protege el panel docente.</div>
+        <div class="config-grid">
+          <div class="config-group"><label>Clave</label><input type="password" id="cfg-clave" placeholder="••••••"></div>
+        </div>
+        <button class="btn btn-blue" onclick="guardarCfg()">Guardar en la nube</button>
+        <span id="cfg-msg" style="font-size:13px;color:#28a745;margin-left:10px;display:inline-block;margin-top:8px"></span>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- LOGIN -->
+<div id="vista-login" style="display:none">
+  <div class="alumno-wrap">
+    <div class="alumno-card">
+      <h2>Acceso docente</h2>
+      <p class="sub">Ingresá la clave para ver el panel.</p>
+      <label class="form-label">Clave</label>
+      <input class="form-input" type="password" id="login-clave" placeholder="••••••"
+        onkeydown="if(event.key==='Enter')login()">
+      <button class="btn-registrar" onclick="login()">Entrar</button>
+      <div class="msg-r" id="login-msg"></div>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL MANUAL -->
+<div class="overlay" id="ov-manual">
+  <div class="modal">
+    <h3>Agregar alumno manualmente</h3>
+    <div class="config-group"><label>Nombre</label>
+      <div class="autocomplete-wrap">
+        <input type="text" id="m-nombre" class="form-input" style="padding:9px 12px;font-size:14px" autocomplete="off"
+          oninput="filtrarSugerenciasManual()" onkeydown="if(event.key==='Enter')agregarManual()">
+        <ul class="autocomplete-lista" id="m-sugerencias" style="display:none"></ul>
+      </div>
+    </div>
+    <div class="config-group"><label>Hora de llegada</label>
+      <input type="time" id="m-hora" class="form-input" style="padding:9px 12px;font-size:14px"></div>
+    <div class="config-group"><label>Estado</label>
+      <select id="m-estado" style="width:100%;padding:9px 12px;border:1.5px solid #d0d0d5;border-radius:8px;font-size:14px;outline:none;background:#fff;color:#1d1d1f">
+        <option value="auto">Calcular según horario</option>
+        <option value="presente">Presente</option>
+        <option value="tardanza">Tardanza</option>
+        <option value="ausente">Ausente</option>
+      </select></div>
+    <div class="modal-btns">
+      <button class="btn" onclick="cerrarOv('ov-manual')">Cancelar</button>
+      <button class="btn btn-blue" onclick="agregarManual()">Agregar</button>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL QR -->
+<div class="overlay" id="ov-qr">
+  <div class="modal">
+    <h3>Link para el código QR</h3>
+    <p style="font-size:13px;color:#6e6e73;margin-bottom:12px">
+      Copiá este link y pegalo en <strong>qr.io</strong> para generar el QR que imprimís en el aula.
+    </p>
+    <div style="background:#f5f5f7;border-radius:8px;padding:12px;font-size:12px;word-break:break-all;margin-bottom:12px;line-height:1.5" id="qr-link-text"></div>
+    <button class="btn btn-blue" style="width:100%;margin-bottom:8px" onclick="copiarLink()">Copiar link</button>
+    <button class="btn" style="width:100%" onclick="cerrarOv('ov-qr')">Cerrar</button>
+  </div>
+</div>
+
+<!-- MODAL EXPORTAR -->
+<div class="overlay" id="ov-export">
+  <div class="modal" style="width:460px">
+    <h3>Exportar a Excel</h3>
+    <p style="font-size:13px;color:#6e6e73;margin-bottom:16px">Formato oficial — Lun–Jue, feriados marcados, % por alumno.</p>
+    <div class="export-opciones">
+      <div class="export-opt" onclick="exportar('hoy')"><h4>Solo hoy</h4><p>Planilla del día de hoy.</p></div>
+      <div class="export-opt" onclick="exportar('planilla')"><h4>Planilla mensual</h4><p>Todo el mes. Incluye la lista completa.</p></div>
+      <div class="export-opt" onclick="exportar('mes-hojas')"><h4>Mes — hoja por día</h4><p>Una pestaña por cada día registrado.</p></div>
+    </div>
+    <button class="btn" style="width:100%;margin-top:14px" onclick="cerrarOv('ov-export')">Cancelar</button>
+  </div>
+</div>
+
+</body>
+</html>
